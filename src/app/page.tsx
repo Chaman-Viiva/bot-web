@@ -8,7 +8,10 @@ export default function Home() {
   const [capturedData, setCapturedData] = useState<any>(null);
 
   useEffect(() => {
-    // Check bot status periodically
+    // Only check bot status if bot is active
+    if (!isBotActive) return;
+    
+    // Check bot status periodically (less frequent)
     const interval = setInterval(async () => {
       try {
         const response = await fetch('/api/bot', {
@@ -29,12 +32,12 @@ export default function Home() {
       } catch (error) {
         console.error('Error checking bot status:', error);
       }
-    }, 2000);
+    }, 5000); // Increased from 2000ms to 5000ms
 
     return () => {
       clearInterval(interval);
     };
-  }, [botStatus]);
+  }, [isBotActive, botStatus]);
 
   const startBot = async () => {
     setIsBotActive(true);
@@ -52,8 +55,20 @@ export default function Home() {
       if (data.success) {
         setBotStatus('👀 Bot is monitoring the first website. Please fill out the form and submit it.');
         
-        // Set up a more aggressive polling mechanism to check for captured data
+        // Set up a single polling mechanism to check for captured data
+        let pollCount = 0;
+        const maxPolls = 20; // Stop after 20 polls (60 seconds)
+        
         const checkForData = setInterval(async () => {
+          pollCount++;
+          
+          // Stop polling after max attempts
+          if (pollCount > maxPolls) {
+            console.log('⏰ Polling timeout reached, stopping...');
+            clearInterval(checkForData);
+            setBotStatus('⏰ Form monitoring timeout - please try manual capture');
+            return;
+          }
           try {
             console.log('🔍 Checking for captured form data...');
             const captureResponse = await fetch('/api/bot', {
@@ -100,7 +115,7 @@ export default function Home() {
           } catch (error) {
             console.error('Error checking for data:', error);
           }
-        }, 1000); // Check every 1 second instead of 3 seconds
+        }, 3000); // Increased to 3 seconds to reduce API calls
         
       } else {
         setBotStatus('❌ Error starting bot');
@@ -123,6 +138,7 @@ export default function Home() {
       
       setIsBotActive(false);
       setBotStatus('');
+      setCapturedData(null);
     } catch (error) {
       console.error('Error stopping bot:', error);
     }

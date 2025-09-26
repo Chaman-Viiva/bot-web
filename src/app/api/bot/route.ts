@@ -65,10 +65,28 @@ let isBotActive = false;
 let capturedData: FormData | null = null;
 
 export async function POST(request: NextRequest) {
-  const { action } = await request.json();
-
   try {
-    switch (action) {
+    // Parse JSON with error handling
+    let requestData;
+    try {
+      requestData = await request.json();
+    } catch (jsonError) {
+      console.error('❌ JSON parsing error:', jsonError);
+      return NextResponse.json({ 
+        error: 'Invalid JSON in request body' 
+      }, { status: 400 });
+    }
+
+    const { action } = requestData;
+
+    if (!action) {
+      return NextResponse.json({ 
+        error: 'Missing action parameter' 
+      }, { status: 400 });
+    }
+
+    try {
+      switch (action) {
       case 'start':
         return await startBot();
       case 'capture':
@@ -93,10 +111,14 @@ export async function POST(request: NextRequest) {
         });
       default:
         return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
+      }
+    } catch (error) {
+      console.error('Bot API error:', error);
+      return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
     }
   } catch (error) {
-    console.error('Bot API error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    console.error('Request processing error:', error);
+    return NextResponse.json({ error: 'Failed to process request' }, { status: 500 });
   }
 }
 
@@ -194,7 +216,7 @@ async function setupFormMonitoring() {
   console.log('🔍 Setting up form monitoring...');
 
   try {
-    // Wait for form to be present
+  // Wait for form to be present
     await sourcePage.waitForSelector('form', { timeout: 15000 });
     console.log('✅ Form found on page');
   } catch (error) {
@@ -389,27 +411,27 @@ async function captureFormData() {
 
       if (isPageValid) {
         console.log('🔍 Trying to capture from source page...');
-        const formData = await sourcePage.evaluate(() => {
-          return (window as any).capturedFormData || null;
-        });
+    const formData = await sourcePage.evaluate(() => {
+      return (window as any).capturedFormData || null;
+    });
 
-        if (formData) {
+    if (formData) {
           console.log('✅ Form data captured from source page!');
-          capturedData = formData;
-          return NextResponse.json({ 
-            success: true, 
-            data: formData,
-            message: 'Form data captured successfully',
-            capturedValues: {
-              firstName: formData.firstName,
-              lastName: formData.lastName,
-              phone: formData.phone,
-              email: formData.email,
-              state: formData.state,
-              zipCode: formData.zipCode,
-              dateOfBirth: formData.dateOfBirth
-            }
-          });
+      capturedData = formData;
+      return NextResponse.json({ 
+        success: true, 
+        data: formData,
+        message: 'Form data captured successfully',
+        capturedValues: {
+          firstName: formData.firstName,
+          lastName: formData.lastName,
+          phone: formData.phone,
+          email: formData.email,
+          state: formData.state,
+          zipCode: formData.zipCode,
+          dateOfBirth: formData.dateOfBirth
+        }
+      });
         }
       }
     } catch (error) {
@@ -431,7 +453,7 @@ async function captureFormData() {
         if (formData) {
           console.log('✅ Form data captured from alternative page!');
           capturedData = formData;
-          return NextResponse.json({ 
+      return NextResponse.json({ 
             success: true, 
             data: formData,
             message: 'Form data captured from alternative page',
@@ -457,8 +479,8 @@ async function captureFormData() {
 
   // If we still can't get data, return error
   console.log('❌ No form data found and no pages available');
-  return NextResponse.json({ 
-    success: false, 
+    return NextResponse.json({ 
+      success: false, 
     message: 'No form data found. Please fill out and submit the form first.' 
   });
 }
@@ -492,9 +514,16 @@ async function transferData() {
   console.log(`🌍 Using location-based username: ${locationBasedUsername} for zip code: ${capturedData.zipCode}`);
 
   try {
-    // Check if browser is already open
-    if (!browser) {
-      console.log('🌐 Launching new browser for destination with location-based IP...');
+    // Always create a new browser instance for destination to ensure clean proxy setup
+    console.log('🌐 Launching new browser for destination with location-based IP...');
+    if (browser) {
+      console.log('🔄 Closing existing browser to ensure clean proxy setup...');
+      await browser.close();
+    }
+    
+    // Try with proxy first
+    let useProxy = true;
+    try {
       browser = await puppeteer.launch({
         headless: false,
         defaultViewport: null,
@@ -513,6 +542,27 @@ async function transferData() {
           `--user-data-dir=/tmp/chrome_${Date.now()}_${capturedData.zipCode}` // Unique session
         ]
       });
+      console.log('✅ Browser launched with proxy');
+    } catch (proxyError) {
+      console.log('⚠️ Failed to launch browser with proxy, trying without proxy...');
+      useProxy = false;
+      browser = await puppeteer.launch({
+        headless: false,
+        defaultViewport: null,
+        args: [
+          '--start-maximized',
+          '--disable-web-security',
+          '--disable-features=VizDisplayCompositor',
+          '--ignore-certificate-errors',
+          '--ignore-ssl-errors',
+          '--allow-running-insecure-content',
+          '--disable-extensions',
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          `--user-data-dir=/tmp/chrome_${Date.now()}_${capturedData.zipCode}` // Unique session
+        ]
+      });
+      console.log('✅ Browser launched without proxy (fallback)');
     }
 
     // Close existing target page if it exists
@@ -525,113 +575,86 @@ async function transferData() {
     console.log('📄 Opening destination website...');
     targetPage = await browser.newPage();
     
-    // Authenticate with proxy for target page using location-based username
-    console.log('🔐 Authenticating with proxy for target page using location-based IP...');
-    console.log(`🔐 Username: ${locationBasedUsername}`);
-    console.log(`🔐 Password: ${PROXY_CONFIG.password}`);
-    console.log(`🌐 Proxy: ${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`);
-    
-    await targetPage.authenticate({
-      username: locationBasedUsername,
-      password: PROXY_CONFIG.password
-    });
+    // Authenticate with proxy for target page using location-based username (only if using proxy)
+    if (useProxy) {
+      console.log('🔐 Authenticating with proxy for target page using location-based IP...');
+      console.log(`🔐 Username: ${locationBasedUsername}`);
+      console.log(`🔐 Password: ${PROXY_CONFIG.password}`);
+      console.log(`🌐 Proxy: ${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`);
+      
+      // Set proxy authentication
+      await targetPage.authenticate({
+        username: locationBasedUsername,
+        password: PROXY_CONFIG.password
+      });
+    } else {
+      console.log('⚠️ Using browser without proxy - no location-based IP routing');
+    }
     
     // DataImpulse will automatically route to the correct location-based IP
     console.log(`🌍 DataImpulse will route to US location for zip code: ${capturedData.zipCode}`);
     
-    // Test the proxy connection immediately
-    console.log('🔍 Testing proxy connection...');
-    try {
-      await targetPage.goto('https://api.ipify.org?format=json', { 
-        waitUntil: 'networkidle2',
-        timeout: 10000 
-      });
-      
-      const ipInfo = await targetPage.evaluate(() => {
-        return document.body.textContent;
-      });
-      
-      console.log(`🌐 Current IP from proxy: ${ipInfo}`);
-      
-      // Get location info
-      await targetPage.goto('https://ipapi.co/json/', { 
-        waitUntil: 'networkidle2',
-        timeout: 10000 
-      });
-      
-      const locationInfo = await targetPage.evaluate(() => {
-        try {
-          const data = JSON.parse(document.body.textContent);
-          return {
-            city: data.city,
-            region: data.region,
-            country: data.country_name,
-            postal: data.postal
-          };
-        } catch (error) {
-          return { city: 'Unknown', region: 'Unknown', country: 'Unknown', postal: 'Unknown' };
-        }
-      });
-      
-      console.log(`📍 Proxy Location: ${locationInfo.city}, ${locationInfo.region}, ${locationInfo.country}`);
-      console.log(`📮 Proxy Postal: ${locationInfo.postal}`);
-      
-      if (locationInfo.country === 'United States') {
-        console.log('✅ SUCCESS: Proxy is routing to US!');
-      } else {
-        console.log(`❌ ISSUE: Proxy is routing to ${locationInfo.country} instead of US`);
-      }
-      
-    } catch (error) {
-      console.log('⚠️ Could not test proxy connection:', error.message);
-    }
+    // Skip IP testing to avoid showing unwanted pages to user
+    console.log('🌍 Proxy configured, proceeding to destination website...');
     
-    // Set a longer timeout for page load
+    // Set a longer timeout for page load with retry mechanism
+    let pageLoaded = false;
+    let retryCount = 0;
+    const maxRetries = 3;
+    
+    while (!pageLoaded && retryCount < maxRetries) {
+      try {
+        console.log(`🌐 Attempting to load destination website (attempt ${retryCount + 1}/${maxRetries})...`);
     await targetPage.goto('https://finalexpensequote.us', { 
       waitUntil: 'networkidle2',
       timeout: 30000 
     });
+        pageLoaded = true;
+        console.log('✅ Destination website loaded successfully');
+      } catch (error) {
+        retryCount++;
+        console.log(`⚠️ Failed to load destination website (attempt ${retryCount}):`, error instanceof Error ? error.message : 'Unknown error');
+        
+        if (retryCount < maxRetries) {
+          console.log('🔄 Retrying in 3 seconds...');
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          
+          // Try to re-authenticate with proxy (only if using proxy)
+          if (useProxy) {
+            try {
+              await targetPage.authenticate({
+                username: locationBasedUsername,
+                password: PROXY_CONFIG.password
+              });
+              console.log('🔐 Re-authenticated with proxy');
+            } catch (authError) {
+              console.log('⚠️ Could not re-authenticate:', authError instanceof Error ? authError.message : 'Unknown error');
+            }
+          }
+        } else {
+          console.log('❌ All retry attempts failed, trying without proxy...');
+          // Try without proxy as fallback
+          try {
+            await targetPage.goto('https://finalexpensequote.us', { 
+              waitUntil: 'networkidle2',
+              timeout: 30000 
+            });
+            pageLoaded = true;
+            console.log('✅ Destination website loaded without proxy (fallback)');
+          } catch (fallbackError) {
+            console.log('❌ Even fallback failed:', fallbackError instanceof Error ? fallbackError.message : 'Unknown error');
+            throw new Error(`Failed to load destination website after ${maxRetries} retries and fallback attempt`);
+          }
+        }
+      }
+    }
 
     console.log('✅ Destination website loaded');
     console.log('⏳ Waiting 3 seconds for page to fully load...');
     await new Promise(resolve => setTimeout(resolve, 3000));
     
-    // Verify the IP address is working
-    console.log('🔍 Verifying IP address and location...');
-    try {
-      const ipInfo = await targetPage.evaluate(() => {
-        return fetch('https://api.ipify.org?format=json')
-          .then(response => response.json())
-          .then(data => data.ip)
-          .catch(() => 'Unknown');
-      });
-      
-      // Get location info for the IP
-      const locationInfo = await targetPage.evaluate(() => {
-        return fetch('https://ipapi.co/json/')
-          .then(response => response.json())
-          .then(data => ({
-            city: data.city,
-            region: data.region,
-            country: data.country_name,
-            postal: data.postal
-          }))
-          .catch(() => ({ city: 'Unknown', region: 'Unknown', country: 'Unknown', postal: 'Unknown' }));
-      });
-      
-      console.log(`✅ Current IP address: ${ipInfo}`);
-      console.log(`📍 Location: ${locationInfo.city}, ${locationInfo.region}, ${locationInfo.country} (Postal: ${locationInfo.postal})`);
-      console.log(`🎯 Target zip code: ${capturedData.zipCode}`);
-      
-      // Check if the location matches the target zip code
-      if (locationInfo.postal === capturedData.zipCode) {
-        console.log('✅ Perfect match! IP location matches target zip code');
-      } else {
-        console.log('⚠️ Location may not match target zip code, but DataImpulse is routing correctly');
-      }
-    } catch (error) {
-      console.log('⚠️ Could not verify IP address:', error instanceof Error ? error.message : 'Unknown error');
-    }
+    // Skip IP verification to avoid showing unwanted pages to user
+    console.log('🌍 Destination website loaded, proceeding with form filling...');
     
     // Scroll down slowly like a human would
     console.log('👤 Scrolling down like a human...');
@@ -779,6 +802,9 @@ async function fillForm(formData: FormData) {
     // Wait a moment for all fields to be filled
     console.log('⏳ Waiting for fields to be filled...');
     await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Skip IP verification to avoid showing unwanted pages to user
+    console.log('🌍 Proceeding with form submission using configured proxy...');
 
     // Human-like pause before submitting
     console.log('👤 Human-like pause before submitting...');
